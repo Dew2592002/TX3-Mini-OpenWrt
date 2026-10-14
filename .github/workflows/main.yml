@@ -1,0 +1,89 @@
+name: Build TX3 Mini OpenWrt
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssid:
+        description: "WiFi SSID"
+        default: "TX3-OpenWrt"
+      psk:
+        description: "WiFi password (8+ chars)"
+        default: "12345678"
+      dtb:
+        description: "DTB file name (optional)"
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest ophub S905W image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p work
+          R=ophub/amlogic-s9xxx-openwrt
+          found=""
+          for t in $(gh api "repos/$R/releases?per_page=20" --jq '.[].tag_name'); do
+            id=$(gh api "repos/$R/releases/tags/$t" --jq .id)
+            names=$(gh api --paginate "repos/$R/releases/$id/assets?per_page=100" --jq '.[].name' | grep -E 's905w_k[0-9].*\.img\.gz$' | sort -V || true)
+            echo "tag $t: $(echo "$names" | grep -c . || true) s905w images"
+            if [ -n "$names" ]; then
+              found="$t"
+              name=$(echo "$names" | tail -n1)
+              break
+            fi
+          done
+          [ -n "$found" ] || { echo "no s905w image found in latest 20 releases"; exit 1; }
+          echo "Using $found / $name"
+          gh release download "$found" -R "$R" -p "$name" -O work/base.img.gz
+          ls -l work
+
+      - name: Get WiFi firmware (BCM4330 / SP6330 = AP6330)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq device-tree-compiler
+          mkdir -p firmware
+          LE=https://raw.githubusercontent.com/LibreELEC/brcmfmac_sdio-firmware/master
+          AR=https://raw.githubusercontent.com/armbian/firmware/master
+          get() { # name url...
+            n="$1"; shift
+            [ -s "firmware/$n" ] && { echo "$n: using file from repo"; return 0; }
+            for u in "$@"; do
+              if curl -fsSL "$u" -o "firmware/$n" && [ -s "firmware/$n" ]; then echo "$n <- $u"; return 0; fi
+              rm -f "firmware/$n"
+            done
+            return 1
+          }
+          get brcmfmac4330-sdio.bin \
+            "$LE/brcmfmac4330-sdio.bin" \
+            "$AR/brcm/brcmfmac4330-sdio.bin" \
+            https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/brcm/brcmfmac4330-sdio.bin \
+            || { echo "::error::cannot get brcmfmac4330-sdio.bin"; exit 1; }
+          get brcmfmac4330-sdio.txt \
+            "$LE/brcmfmac4330-sdio.txt" \
+            "$AR/rkwifi/nvram_AP6330.txt" \
+            "$AR/brcm/brcmfmac-ap6330-sdio.txt" \
+            || { echo "::error::cannot get nvram txt"; exit 1; }
+          ls -l firmware
+
+      - name: Build image
+        env:
+          SSID: ${{ inputs.ssid }}
+          PSK: ${{ inputs.psk }}
+          DTB: ${{ inputs.dtb }}
+        run: |
+          chmod +x build-tx3mini-openwrt.sh
+          sudo -E ./build-tx3mini-openwrt.sh work/base.img.gz firmware
+          gzip -f tx3mini-openwrt-wifi.img
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: TX3 Mini OpenWrt build ${{ github.run_number }}
+          files: tx3mini-openwrt-wifi.img.gz
