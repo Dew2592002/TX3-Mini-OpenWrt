@@ -12,6 +12,9 @@ on:
       dtb:
         description: "DTB file name (optional)"
         default: ""
+      kernel:
+        description: "Kernel series (6.12 or 6.18)"
+        default: "6.12"
 
 permissions:
   contents: write
@@ -22,24 +25,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download latest ophub S905W image
+      - name: Download ophub S905W image
         env:
           GH_TOKEN: ${{ github.token }}
+          KP: ${{ inputs.kernel }}
         run: |
           mkdir -p work
+          KP="${KP:-6.12}"
           R=ophub/amlogic-s9xxx-openwrt
           found=""
           for t in $(gh api "repos/$R/releases?per_page=20" --jq '.[].tag_name'); do
             id=$(gh api "repos/$R/releases/tags/$t" --jq .id)
-            names=$(gh api --paginate "repos/$R/releases/$id/assets?per_page=100" --jq '.[].name' | grep -E 's905w_k[0-9].*\.img\.gz$' | sort -V || true)
-            echo "tag $t: $(echo "$names" | grep -c . || true) s905w images"
+            names=$(gh api --paginate "repos/$R/releases/$id/assets?per_page=100" --jq '.[].name' | grep -E "s905w_k${KP}[.0-9]*_[0-9.]+\.img\.gz$" | sort -V || true)
+            echo "tag $t: $(echo "$names" | grep -c . || true) matching images"
             if [ -n "$names" ]; then
               found="$t"
               name=$(echo "$names" | tail -n1)
               break
             fi
           done
-          [ -n "$found" ] || { echo "no s905w image found in latest 20 releases"; exit 1; }
+          [ -n "$found" ] || { echo "no s905w image for kernel $KP"; exit 1; }
           echo "Using $found / $name"
           gh release download "$found" -R "$R" -p "$name" -O work/base.img.gz
           ls -l work
@@ -50,7 +55,7 @@ jobs:
           mkdir -p firmware
           LE=https://raw.githubusercontent.com/LibreELEC/brcmfmac_sdio-firmware/master
           AR=https://raw.githubusercontent.com/armbian/firmware/master
-          get() { # name url...
+          get() {
             n="$1"; shift
             [ -s "firmware/$n" ] && { echo "$n: using file from repo"; return 0; }
             for u in "$@"; do
@@ -78,6 +83,7 @@ jobs:
           DTB: ${{ inputs.dtb }}
         run: |
           chmod +x build-tx3mini-openwrt.sh
+          cp work/base.img.gz tx3mini-openwrt-base.img.gz
           sudo -E ./build-tx3mini-openwrt.sh work/base.img.gz firmware
           gzip -f tx3mini-openwrt-wifi.img
 
@@ -86,4 +92,6 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: TX3 Mini OpenWrt build ${{ github.run_number }}
-          files: tx3mini-openwrt-wifi.img.gz
+          files: |
+            tx3mini-openwrt-wifi.img.gz
+            tx3mini-openwrt-base.img.gz
